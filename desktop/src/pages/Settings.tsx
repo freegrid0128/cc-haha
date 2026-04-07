@@ -5,10 +5,10 @@ import { useUIStore } from '../stores/uiStore'
 import { Modal } from '../components/shared/Modal'
 import { Input } from '../components/shared/Input'
 import { Button } from '../components/shared/Button'
-import type { PermissionMode, EffortLevel, ModelInfo } from '../types/settings'
+import type { PermissionMode, EffortLevel } from '../types/settings'
 import type { Provider, ProviderModel, UpdateProviderInput, ProviderTestResult } from '../types/provider'
 
-type SettingsTab = 'providers' | 'model' | 'permissions' | 'general'
+type SettingsTab = 'providers' | 'permissions' | 'general'
 
 export function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers')
@@ -31,7 +31,6 @@ export function Settings() {
         {/* Tab navigation */}
         <div className="w-48 border-r border-[var(--color-border)] py-3 flex-shrink-0">
           <TabButton icon="dns" label="Providers" active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
-          <TabButton icon="auto_awesome" label="Model" active={activeTab === 'model'} onClick={() => setActiveTab('model')} />
           <TabButton icon="shield" label="Permissions" active={activeTab === 'permissions'} onClick={() => setActiveTab('permissions')} />
           <TabButton icon="tune" label="General" active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
         </div>
@@ -39,7 +38,6 @@ export function Settings() {
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto px-8 py-6">
           {activeTab === 'providers' && <ProviderSettings />}
-          {activeTab === 'model' && <ModelSettings />}
           {activeTab === 'permissions' && <PermissionSettings />}
           {activeTab === 'general' && <GeneralSettings />}
         </div>
@@ -282,11 +280,18 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
 
   const handleTest = async () => {
     const firstModel = models.find((m) => m.id.trim())
-    if (!baseUrl.trim() || !apiKey.trim() || !firstModel) return
+    if (!baseUrl.trim() || !firstModel) return
     setIsTesting(true)
     setTestResult(null)
     try {
-      const result = await testConfig({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), modelId: firstModel.id.trim() })
+      let result: ProviderTestResult
+      if (mode === 'edit' && provider && !apiKey.trim()) {
+        // Edit mode without new key — test saved provider directly
+        result = await useProviderStore.getState().testProvider(provider.id)
+      } else {
+        if (!apiKey.trim()) return
+        result = await testConfig({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), modelId: firstModel.id.trim() })
+      }
       setTestResult(result)
     } catch {
       setTestResult({ success: false, latencyMs: 0, error: 'Request failed' })
@@ -376,7 +381,7 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
 
         {/* Test connection */}
         <div className="flex items-center gap-3">
-          <Button variant="secondary" size="sm" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !apiKey.trim() || !models.some((m) => m.id.trim())}>
+          <Button variant="secondary" size="sm" onClick={handleTest} loading={isTesting} disabled={!baseUrl.trim() || !models.some((m) => m.id.trim())}>
             Test Connection
           </Button>
           {testResult && (
@@ -390,138 +395,6 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
   )
 }
 
-// ─── Model Settings ──────────────────────────────────────
-
-function ModelSettings() {
-  const { availableModels, currentModel, effortLevel, activeProviderName, setModel, setEffort, fetchAll } = useSettingsStore()
-  const [customModelId, setCustomModelId] = useState('')
-  const [showCustom, setShowCustom] = useState(false)
-
-  useEffect(() => { fetchAll() }, [fetchAll])
-
-  const handleSelectModel = async (model: ModelInfo) => {
-    await setModel(model.id)
-  }
-
-  const handleCustomModel = async () => {
-    const id = customModelId.trim()
-    if (!id) return
-    await setModel(id)
-    setShowCustom(false)
-    setCustomModelId('')
-  }
-
-  const MODEL_ICONS: Record<string, string> = {
-    'opus': 'diamond',
-    'sonnet': 'auto_awesome',
-    'haiku': 'bolt',
-  } as const
-
-  const getModelIcon = (id: string) => {
-    if (id.includes('opus')) return MODEL_ICONS['opus']
-    if (id.includes('sonnet')) return MODEL_ICONS['sonnet']
-    if (id.includes('haiku')) return MODEL_ICONS['haiku']
-    return 'smart_toy'
-  }
-
-  const EFFORT_LABELS: Record<EffortLevel, string> = {
-    low: 'Low',
-    medium: 'Medium',
-    high: 'High',
-    max: 'Max',
-  }
-
-  return (
-    <div className="max-w-xl">
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">Model</h2>
-      <p className="text-sm text-[var(--color-text-tertiary)] mb-4">
-        Choose the AI model for new conversations.
-        {activeProviderName && (
-          <span className="ml-1 text-[var(--color-text-secondary)]">
-            (via <span className="font-medium">{activeProviderName}</span>)
-          </span>
-        )}
-      </p>
-
-      <div className="flex flex-col gap-2 mb-6">
-        {availableModels.map((model) => {
-          const isSelected = currentModel?.id === model.id
-          return (
-            <button
-              key={model.id}
-              onClick={() => handleSelectModel(model)}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all text-left ${
-                isSelected
-                  ? 'border-[var(--color-brand)] bg-[var(--color-primary-fixed)]'
-                  : 'border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              <span className="material-symbols-outlined text-[20px] text-[var(--color-text-secondary)]">
-                {getModelIcon(model.id)}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-[var(--color-text-primary)]">{model.name}</div>
-                <div className="text-xs text-[var(--color-text-tertiary)]">{model.description} · {model.context} context</div>
-              </div>
-              {isSelected && (
-                <span className="material-symbols-outlined text-[18px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
-                  check_circle
-                </span>
-              )}
-            </button>
-          )
-        })}
-
-        {/* Custom model */}
-        {showCustom ? (
-          <div className="flex items-center gap-2 px-4 py-3 rounded-xl border border-[var(--color-border)]">
-            <input
-              type="text"
-              value={customModelId}
-              onChange={(e) => setCustomModelId(e.target.value)}
-              placeholder="Enter model ID (e.g. claude-sonnet-4-6-20250514)"
-              className="flex-1 text-sm bg-transparent outline-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]"
-              onKeyDown={(e) => e.key === 'Enter' && handleCustomModel()}
-            />
-            <button onClick={handleCustomModel} className="px-3 py-1 text-xs font-semibold text-white bg-[var(--color-brand)] rounded-lg hover:opacity-90">
-              Apply
-            </button>
-            <button onClick={() => setShowCustom(false)} className="px-2 py-1 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]">
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setShowCustom(true)}
-            className="flex items-center gap-3 px-4 py-3 rounded-xl border border-dashed border-[var(--color-border)] hover:border-[var(--color-border-focus)] text-left transition-colors"
-          >
-            <span className="material-symbols-outlined text-[20px] text-[var(--color-text-tertiary)]">add</span>
-            <span className="text-sm text-[var(--color-text-secondary)]">Use custom model ID</span>
-          </button>
-        )}
-      </div>
-
-      {/* Effort level */}
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">Effort Level</h2>
-      <p className="text-sm text-[var(--color-text-tertiary)] mb-3">Controls how much computation the model uses.</p>
-      <div className="flex gap-2">
-        {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
-          <button
-            key={level}
-            onClick={() => setEffort(level)}
-            className={`flex-1 py-2 text-xs font-semibold rounded-lg border transition-all ${
-              effortLevel === level
-                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            {EFFORT_LABELS[level]}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 // ─── Permission Settings ──────────────────────────────────────
 
@@ -574,12 +447,34 @@ function PermissionSettings() {
 // ─── General Settings ──────────────────────────────────────
 
 function GeneralSettings() {
+  const { effortLevel, setEffort } = useSettingsStore()
+
+  const EFFORT_LABELS: Record<EffortLevel, string> = {
+    low: 'Low',
+    medium: 'Medium',
+    high: 'High',
+    max: 'Max',
+  }
+
   return (
     <div className="max-w-xl">
-      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">General</h2>
-      <p className="text-sm text-[var(--color-text-tertiary)] mb-4">
-        API configuration is now managed through the <strong>Providers</strong> tab.
-      </p>
+      <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">Effort Level</h2>
+      <p className="text-sm text-[var(--color-text-tertiary)] mb-3">Controls how much computation the model uses.</p>
+      <div className="flex gap-2">
+        {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+          <button
+            key={level}
+            onClick={() => setEffort(level)}
+            className={`flex-1 py-2 text-xs font-semibold rounded-lg border transition-all ${
+              effortLevel === level
+                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+            }`}
+          >
+            {EFFORT_LABELS[level]}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
