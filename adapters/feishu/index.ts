@@ -21,7 +21,7 @@ import {
   truncateInput,
 } from '../common/format.js'
 import { SessionStore } from '../common/session-store.js'
-import { AdapterHttpClient } from '../common/http-client.js'
+import { AdapterHttpClient, type RecentProject } from '../common/http-client.js'
 import { isAllowedUser, tryPair } from '../common/pairing.js'
 
 // ---------- init ----------
@@ -221,19 +221,143 @@ async function sendCard(chatId: string, card: Record<string, unknown>): Promise<
   }
 }
 
-/** Update a message's content (patch). */
+/** Build a simple streaming text card (Schema 1.0, patchable via im.message.patch). */
+function buildStreamingCard(text: string): Record<string, unknown> {
+  return {
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+    },
+    elements: [
+      { tag: 'markdown', content: text || ' ' },
+    ],
+  }
+}
+
+/** Update a streaming card message's content (patch).
+ *  Note: im.message.patch only works on interactive cards, so the source
+ *  message MUST have been sent via sendCard(buildStreamingCard(...)). */
 async function patchMessage(messageId: string, text: string): Promise<void> {
   try {
     await larkClient.im.message.patch({
       path: { message_id: messageId },
       data: {
-        content: JSON.stringify({
-          zh_cn: { content: [[{ tag: 'md', text }]] },
-        }),
+        content: JSON.stringify(buildStreamingCard(text)),
       },
     })
-  } catch {
-    // patch may fail if message format changed — ignore
+  } catch (err) {
+    // patch may fail (rate limit, message expired, etc.) — log and ignore
+    console.error('[Feishu] patchMessage error:', err instanceof Error ? err.message : err)
+  }
+}
+
+/** Pretty-print an absolute path for IM display.
+ *  - Replace $HOME with `~`
+ *  - Middle-truncate if it's still very long, keeping the project tail visible */
+function prettyPath(realPath: string, maxLen = 64): string {
+  const home = process.env.HOME
+  let p = realPath
+  if (home) {
+    if (p === home) return '~'
+    if (p.startsWith(`${home}/`)) p = `~${p.slice(home.length)}`
+  }
+  if (p.length <= maxLen) return p
+  // Project name lives at the tail — keep more of the tail than the head.
+  const tailLen = Math.floor(maxLen * 0.65)
+  const headLen = maxLen - tailLen - 1
+  return `${p.slice(0, headLen)}…${p.slice(-tailLen)}`
+}
+
+/** Build an interactive project picker card — mobile-first layout.
+ *
+ *  Design: one column_set per project with exactly 2 columns:
+ *    - Col 1 (weighted): project info (title markdown + small grey path)
+ *    - Col 2 (auto):     "选择" button, vertically centered
+ *
+ *  Only 2 columns with one weighted + one auto means the weight distribution
+ *  is trivial (auto takes its natural width, weighted takes the rest). This
+ *  avoids the layout issues seen in 3-column attempts. */
+function buildProjectPickerCard(projects: RecentProject[]): Record<string, unknown> {
+  const items = projects.slice(0, 10)
+  const total = projects.length
+  const subtitleText =
+    total > items.length
+      ? `共 ${total} 个最近项目，显示前 ${items.length}`
+      : `共 ${total} 个最近项目`
+
+  const rows = items.map((p, i) => {
+    const branch = p.branch ? `  ·  *${p.branch}*` : ''
+    return {
+      tag: 'column_set',
+      flex_mode: 'stretch',
+      horizontal_spacing: '8px',
+      margin: i === 0 ? '0px 0 0 0' : '10px 0 0 0',
+      columns: [
+        // Col 1 — project info (title + notation path, stacked)
+        {
+          tag: 'column',
+          width: 'weighted',
+          weight: 1,
+          vertical_align: 'center',
+          elements: [
+            {
+              tag: 'markdown',
+              content: `**${p.projectName}**${branch}`,
+            },
+            {
+              tag: 'markdown',
+              content: prettyPath(p.realPath, 56),
+              text_size: 'notation',
+              margin: '2px 0 0 0',
+            },
+          ],
+        },
+        // Col 2 — action button (auto width, vertically centered)
+        {
+          tag: 'column',
+          width: 'auto',
+          vertical_align: 'center',
+          elements: [
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: '选择' },
+              type: i === 0 ? 'primary' : 'default',
+              size: 'small',
+              value: {
+                action: 'pick_project',
+                realPath: p.realPath,
+                projectName: p.projectName,
+              },
+            },
+          ],
+        },
+      ],
+    }
+  })
+
+  return {
+    schema: '2.0',
+    config: {
+      wide_screen_mode: true,
+      update_multi: true,
+    },
+    header: {
+      title: { tag: 'plain_text', content: '📁 选择项目' },
+      subtitle: { tag: 'plain_text', content: subtitleText },
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        ...rows,
+        { tag: 'hr', margin: '14px 0 0 0' },
+        {
+          tag: 'markdown',
+          content: '💡 点击右侧 **选择** 按钮，或发送 `/new <项目名>`',
+          text_size: 'notation',
+          margin: '6px 0 0 0',
+        },
+      ],
+    },
   }
 }
 
@@ -346,11 +470,15 @@ async function showProjectPicker(chatId: string): Promise<void> {
         '没有找到最近的项目。请先在 Desktop App 中打开一个项目，或在设置中配置默认项目。')
       return
     }
-    const lines = projects.slice(0, 10).map((p, i) =>
-      `${i + 1}. **${p.projectName}**${p.branch ? ` (${p.branch})` : ''}\n   ${p.realPath}`
-    )
     pendingProjectSelection.set(chatId, true)
-    await sendText(chatId, `选择项目（回复编号）：\n\n${lines.join('\n\n')}\n\n💡 下次可直接 /new <编号或名称> 快速新建会话`)
+    const cardId = await sendCard(chatId, buildProjectPickerCard(projects))
+    if (!cardId) {
+      // Fallback to text picker if card delivery failed (permissions, etc.)
+      const lines = projects.slice(0, 10).map((p, i) =>
+        `${i + 1}. **${p.projectName}**${p.branch ? ` (${p.branch})` : ''}\n   ${p.realPath}`
+      )
+      await sendText(chatId, `选择项目（回复编号）：\n\n${lines.join('\n\n')}\n\n💡 下次可直接 /new <编号或名称> 快速新建会话`)
+    }
   } catch (err) {
     await sendText(chatId, `❌ 无法获取项目列表: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -414,7 +542,7 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       runtime.state = msg.state
       runtime.verb = typeof msg.verb === 'string' ? msg.verb : undefined
       if (msg.state === 'thinking' && !state.replyMessageId) {
-        const mid = await sendText(chatId, '💭 思考中...')
+        const mid = await sendCard(chatId, buildStreamingCard('💭 思考中...'))
         if (mid) {
           state.replyMessageId = mid
           accumulatedText.set(chatId, '')
@@ -425,7 +553,7 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
     case 'content_start':
       if (msg.blockType === 'text') {
         if (!state.replyMessageId) {
-          const mid = await sendText(chatId, '▍')
+          const mid = await sendCard(chatId, buildStreamingCard('▍'))
           if (mid) {
             state.replyMessageId = mid
             accumulatedText.set(chatId, '')
@@ -659,48 +787,75 @@ async function handleMessage(data: any): Promise<void> {
 async function handleCardAction(data: any): Promise<any> {
   const event = data as {
     operator?: { open_id?: string }
-    action?: { value?: { action?: string; requestId?: string; allowed?: boolean } }
+    action?: {
+      value?: {
+        action?: string
+        requestId?: string
+        allowed?: boolean
+        realPath?: string
+        projectName?: string
+      }
+    }
     context?: { open_chat_id?: string }
   }
 
   const action = event.action?.value?.action
-  if (action !== 'permit') return
-
-  const requestId = event.action?.value?.requestId
-  const allowed = event.action?.value?.allowed ?? false
   const chatId = event.context?.open_chat_id
+  if (!chatId) return
 
-  if (!requestId || !chatId) return
+  if (action === 'permit') {
+    const requestId = event.action?.value?.requestId
+    const allowed = event.action?.value?.allowed ?? false
+    if (!requestId) return
 
-  bridge.sendPermissionResponse(chatId, requestId, allowed)
-  const runtime = getRuntimeState(chatId)
-  runtime.pendingPermissionCount = Math.max(0, runtime.pendingPermissionCount - 1)
+    bridge.sendPermissionResponse(chatId, requestId, allowed)
+    const runtime = getRuntimeState(chatId)
+    runtime.pendingPermissionCount = Math.max(0, runtime.pendingPermissionCount - 1)
 
-  const statusText = allowed ? '✅ 已允许' : '❌ 已拒绝'
-  await sendText(chatId, statusText)
+    const statusText = allowed ? '✅ 已允许' : '❌ 已拒绝'
+    await sendText(chatId, statusText)
+    return { toast: { type: 'info', content: statusText } }
+  }
 
-  return {
-    toast: { type: 'info', content: statusText },
+  if (action === 'pick_project') {
+    const realPath = event.action?.value?.realPath
+    const projectName = event.action?.value?.projectName ?? realPath ?? '(unknown)'
+    if (!realPath) return
+
+    pendingProjectSelection.delete(chatId)
+    // createSessionForChat handles its own error messaging on failure
+    const ok = await createSessionForChat(chatId, realPath)
+    if (ok) {
+      await sendText(chatId, `✅ 已新建会话：**${projectName}**`)
+    }
+    return { toast: { type: 'info', content: `📁 ${projectName}` } }
   }
 }
 
 // ---------- resolve bot identity ----------
 
 async function resolveBotOpenId(retries = 3): Promise<void> {
+  // Feishu has no "me" user_id literal — use /open-apis/bot/v3/info to fetch
+  // the bot's identity via tenant_access_token. Response shape:
+  //   { code: 0, msg: 'ok', bot: { open_id: 'ou_xxx', ... } }
   for (let i = 0; i < retries; i++) {
     try {
-      const resp = await larkClient.contact.user.get({
-        path: { user_id: 'me' },
-        params: { user_id_type: 'open_id' },
+      const resp = await (larkClient as any).request({
+        method: 'GET',
+        url: '/open-apis/bot/v3/info',
       })
-      botOpenId = (resp.data?.user as any)?.open_id ?? null
-      if (botOpenId) {
+      const openId = resp?.bot?.open_id ?? resp?.data?.bot?.open_id ?? null
+      if (openId) {
+        botOpenId = openId
         console.log(`[Feishu] Bot open_id: ${botOpenId}`)
         return
       }
-    } catch {
+    } catch (err) {
       if (i < retries - 1) {
-        console.warn(`[Feishu] Could not resolve bot open_id, retrying (${i + 1}/${retries})...`)
+        console.warn(
+          `[Feishu] Could not resolve bot open_id, retrying (${i + 1}/${retries})...`,
+          err instanceof Error ? err.message : err,
+        )
         await new Promise((r) => setTimeout(r, 2000 * (i + 1)))
       }
     }
