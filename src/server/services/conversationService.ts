@@ -528,13 +528,18 @@ export class ConversationService {
       CLAUDE_CODE_ENTRYPOINT: 'claude-desktop',
     }
     try {
+      // deferred import: avoids instantiating the OAuth singleton on every
+      // ConversationService construction — only loaded when official mode hits.
       const { hahaOAuthService } = await import('./hahaOAuthService.js')
       const token = await hahaOAuthService.ensureFreshAccessToken()
       if (token) {
         env.CLAUDE_CODE_OAUTH_TOKEN = token
       }
     } catch (err) {
-      console.error('[conversationService] ensureFreshAccessToken failed:', err)
+      console.error(
+        '[conversationService] ensureFreshAccessToken failed:',
+        err instanceof Error ? err.message : err,
+      )
     }
     return env
   }
