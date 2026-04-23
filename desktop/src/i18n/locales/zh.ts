@@ -83,6 +83,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.proxyFailed': '② 代理转换失败: {error}',
   'settings.providers.confirmDelete': '删除服务商 "{name}"？此操作不可撤销。',
   'settings.providers.activate': '激活',
+  'settings.providers.default': '默认',
+  'settings.providers.setDefault': '设为默认',
   'settings.providers.test': '测试',
   'settings.providers.edit': '编辑',
   'settings.providers.requestFailed': '请求失败',

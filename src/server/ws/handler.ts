@@ -49,6 +49,11 @@ const sessionTitleState = new Map<string, {
   allUserMessages: string[]
 }>()
 
+const runtimeOverrides = new Map<string, {
+  providerId: string | null
+  modelId: string
+}>()
+
 export function getSlashCommands(sessionId: string): Array<{ name: string; description: string }> {
   return sessionSlashCommands.get(sessionId) || []
 }
@@ -126,6 +131,10 @@ export const handleWebSocket = {
 
         case 'set_permission_mode':
           handleSetPermissionMode(ws, message)
+          break
+
+        case 'set_runtime_config':
+          void handleSetRuntimeConfig(ws, message)
           break
 
         case 'stop_generation':
@@ -213,7 +222,7 @@ async function handleUserMessage(
           }`,
         )
       }
-      const runtimeSettings = await getRuntimeSettings()
+      const runtimeSettings = await getRuntimeSettings(sessionId)
       const sdkUrl =
         `ws://${ws.data.serverHost}:${ws.data.serverPort}/sdk/${sessionId}` +
         `?token=${encodeURIComponent(crypto.randomUUID())}`
@@ -331,6 +340,43 @@ function handleSetPermissionMode(
   }
 }
 
+async function handleSetRuntimeConfig(
+  ws: ServerWebSocket<WebSocketData>,
+  message: Extract<ClientMessage, { type: 'set_runtime_config' }>
+) {
+  const { sessionId } = ws.data
+  const modelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
+  if (!modelId) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Runtime model selection is invalid.',
+      code: 'RUNTIME_CONFIG_INVALID',
+    })
+    return
+  }
+
+  const nextOverride = {
+    providerId: message.providerId ?? null,
+    modelId,
+  }
+  const prevOverride = runtimeOverrides.get(sessionId)
+  runtimeOverrides.set(sessionId, nextOverride)
+
+  if (
+    prevOverride &&
+    prevOverride.providerId === nextOverride.providerId &&
+    prevOverride.modelId === nextOverride.modelId
+  ) {
+    return
+  }
+
+  if (!conversationService.hasSession(sessionId)) {
+    return
+  }
+
+  await restartSessionWithRuntimeConfig(ws, sessionId)
+}
+
 async function restartSessionWithPermissionMode(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
@@ -346,7 +392,7 @@ async function restartSessionWithPermissionMode(
     conversationService.stopSession(sessionId)
 
     // Rebuild runtime settings (will pick up the persisted mode)
-    const runtimeSettings = await getRuntimeSettings()
+    const runtimeSettings = await getRuntimeSettings(sessionId)
     const sdkUrl =
       `ws://${ws.data.serverHost}:${ws.data.serverPort}/sdk/${sessionId}` +
       `?token=${encodeURIComponent(crypto.randomUUID())}`
@@ -360,6 +406,40 @@ async function restartSessionWithPermissionMode(
     sendMessage(ws, {
       type: 'error',
       message: `Failed to restart session with new permission mode: ${errMsg}`,
+      code: 'CLI_RESTART_FAILED',
+    })
+    sendMessage(ws, { type: 'status', state: 'idle' })
+  }
+}
+
+async function restartSessionWithRuntimeConfig(
+  ws: ServerWebSocket<WebSocketData>,
+  sessionId: string,
+): Promise<void> {
+  try {
+    sendMessage(ws, {
+      type: 'status',
+      state: 'thinking',
+      verb: 'Switching provider and model...',
+    })
+
+    const workDir = conversationService.getSessionWorkDir(sessionId)
+    conversationService.stopSession(sessionId)
+
+    const runtimeSettings = await getRuntimeSettings(sessionId)
+    const sdkUrl =
+      `ws://${ws.data.serverHost}:${ws.data.serverPort}/sdk/${sessionId}` +
+      `?token=${encodeURIComponent(crypto.randomUUID())}`
+    await conversationService.startSession(sessionId, workDir, sdkUrl, runtimeSettings)
+
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    console.log(`[WS] Restarted CLI for ${sessionId} with runtime override`)
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error(`[WS] Failed to restart CLI for ${sessionId} after runtime override: ${errMsg}`)
+    sendMessage(ws, {
+      type: 'error',
+      message: `Failed to switch provider/model: ${errMsg}`,
       code: 'CLI_RESTART_FAILED',
     })
     sendMessage(ws, { type: 'status', state: 'idle' })
@@ -404,6 +484,7 @@ function triggerTitleGeneration(ws: ServerWebSocket<WebSocketData>, sessionId: s
   const text = count === 1
     ? state.firstUserMessage
     : state.allUserMessages.join('\n')
+  const runtimeProviderId = runtimeOverrides.get(sessionId)?.providerId
 
   // Fire-and-forget: derive quick title, then upgrade with AI
   void (async () => {
@@ -418,7 +499,7 @@ function triggerTitleGeneration(ws: ServerWebSocket<WebSocketData>, sessionId: s
       }
 
       // Stage 2: AI-generated title
-      const aiTitle = await generateTitle(text)
+      const aiTitle = await generateTitle(text, runtimeProviderId)
       if (aiTitle) {
         await saveAiTitle(sessionId, aiTitle)
         sendMessage(ws, { type: 'session_title_updated', sessionId, title: aiTitle })
@@ -471,6 +552,7 @@ function cleanupSessionRuntimeState(sessionId: string) {
   cleanupStreamState(sessionId)
   sessionSlashCommands.delete(sessionId)
   sessionTitleState.delete(sessionId)
+  runtimeOverrides.delete(sessionId)
 }
 
 function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
@@ -845,11 +927,28 @@ function rebindSessionOutput(
   })
 }
 
-async function getRuntimeSettings(): Promise<{
+async function getRuntimeSettings(sessionId?: string): Promise<{
   permissionMode?: string
   model?: string
   effort?: string
+  providerId?: string | null
 }> {
+  const runtimeOverride = sessionId ? runtimeOverrides.get(sessionId) : undefined
+  if (runtimeOverride) {
+    const userSettings = await settingsService.getUserSettings()
+    const effort =
+      typeof userSettings.effort === 'string' && userSettings.effort.trim()
+        ? userSettings.effort
+        : undefined
+
+    return {
+      permissionMode: await settingsService.getPermissionMode().catch(() => undefined),
+      model: runtimeOverride.modelId,
+      effort,
+      providerId: runtimeOverride.providerId,
+    }
+  }
+
   // Check if a custom provider is active
   const { activeId } = await providerService.listProviders()
   const userSettings = await settingsService.getUserSettings()

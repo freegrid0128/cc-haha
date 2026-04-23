@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MessageEntry } from '../types/session'
+import { useSessionRuntimeStore } from './sessionRuntimeStore'
 
 const {
   sendMock,
@@ -114,6 +115,8 @@ describe('chatStore history mapping', () => {
     refreshTasksMock.mockReset()
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
+    useSessionRuntimeStore.setState({ selections: {} })
+    localStorage.clear()
     useChatStore.setState({
       ...initialState,
       sessions: {},
@@ -256,6 +259,34 @@ describe('chatStore history mapping', () => {
         parentToolUseId: 'agent-1',
       },
     ])
+  })
+
+  it('replays saved runtime selection when reconnecting a session', () => {
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, {
+      providerId: 'provider-1',
+      modelId: 'kimi-k2.6',
+    })
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'set_runtime_config',
+      providerId: 'provider-1',
+      modelId: 'kimi-k2.6',
+    })
+  })
+
+  it('sends explicit runtime overrides over websocket', () => {
+    useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    })
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'set_runtime_config',
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    })
   })
 
   it('keeps AskUserQuestion permission requests out of the message list while tracking the pending request', () => {

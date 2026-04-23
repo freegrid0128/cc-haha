@@ -3,8 +3,12 @@ import { skillsApi } from '../api/skills'
 import { useTranslation } from '../i18n'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
+import { useProviderStore } from '../stores/providerStore'
+import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../stores/sessionRuntimeStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
+import { OFFICIAL_DEFAULT_MODEL_ID } from '../constants/modelCatalog'
 import { DirectoryPicker } from '../components/shared/DirectoryPicker'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector } from '../components/controls/ModelSelector'
@@ -54,6 +58,7 @@ export function EmptySession() {
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const createSession = useSessionStore((state) => state.createSession)
   const sendMessage = useChatStore((state) => state.sendMessage)
+  const setSessionRuntime = useChatStore((state) => state.setSessionRuntime)
   const connectToSession = useChatStore((state) => state.connectToSession)
   const setActiveView = useUIStore((state) => state.setActiveView)
   const addToast = useUIStore((state) => state.addToast)
@@ -201,10 +206,34 @@ export function EmptySession() {
 
     setIsSubmitting(true)
     try {
+      const settings = useSettingsStore.getState()
+      let providerState = useProviderStore.getState()
+      if (
+        settings.activeProviderName &&
+        providerState.providers.length === 0 &&
+        !providerState.isLoading
+      ) {
+        await providerState.fetchProviders()
+        providerState = useProviderStore.getState()
+      }
+      const inferredProviderId = providerState.activeId ?? (
+        settings.activeProviderName
+          ? providerState.providers.find((provider) => provider.name === settings.activeProviderName)?.id ?? null
+          : null
+      )
+      const draftSelection =
+        useSessionRuntimeStore.getState().selections[DRAFT_RUNTIME_SELECTION_KEY]
+        ?? {
+          providerId: inferredProviderId,
+          modelId: settings.currentModel?.id ?? OFFICIAL_DEFAULT_MODEL_ID,
+        }
       const sessionId = await createSession(workDir || undefined)
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
       connectToSession(sessionId)
+      useSessionRuntimeStore.getState().setSelection(sessionId, draftSelection)
+      useSessionRuntimeStore.getState().clearSelection(DRAFT_RUNTIME_SELECTION_KEY)
+      setSessionRuntime(sessionId, draftSelection)
       const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,
@@ -557,7 +586,7 @@ export function EmptySession() {
               </div>
 
               <div className="flex items-center gap-3">
-                <ModelSelector />
+                <ModelSelector runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} />
                 <button
                   onClick={handleSubmit}
                   disabled={(!input.trim() && attachments.length === 0) || isSubmitting}

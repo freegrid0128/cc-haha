@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { ConversationService } from '../services/conversationService.js'
+import { ProviderService } from '../services/providerService.js'
 
 describe('ConversationService', () => {
   let tmpDir: string
@@ -130,6 +131,61 @@ describe('ConversationService', () => {
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
   })
 
+  test('buildChildEnv injects explicit provider runtime env for session-scoped providers', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Packy',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.packy.example',
+      apiFormat: 'openai_chat',
+      models: {
+        main: 'kimi-k2.6',
+        haiku: '',
+        sonnet: '',
+        opus: '',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_BASE_URL).toBe(`http://127.0.0.1:3456/proxy/providers/${provider.id}`)
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('proxy-managed')
+    expect(env.ANTHROPIC_MODEL).toBe('kimi-k2.6')
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+  })
+
+  test('buildChildEnv can force official auth even when a custom default provider exists', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'custom-provider-token' } }),
+      'utf-8',
+    )
+
+    const { hahaOAuthService } = await import('../services/hahaOAuthService.js')
+    await hahaOAuthService.saveTokens({
+      accessToken: 'forced-official-token',
+      refreshToken: 'forced-official-refresh',
+      expiresAt: Date.now() + 30 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'max',
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: null,
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe('claude-desktop')
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('forced-official-token')
+  })
+
   test('buildChildEnv does not leak inherited CLAUDE_CODE_OAUTH_TOKEN when official token is unavailable', async () => {
     const ccHahaDir = path.join(tmpDir, 'cc-haha')
     await fs.mkdir(ccHahaDir, { recursive: true })
@@ -184,5 +240,23 @@ describe('ConversationService', () => {
     expect(args).toContain('--include-partial-messages')
     expect(args).toContain('--sdk-url')
     expect(args).toContain('--replay-user-messages')
+  })
+
+  test('buildSessionCliArgs forwards the selected runtime model and effort to the CLI process', () => {
+    const service = new ConversationService() as any
+    const args = service.buildSessionCliArgs(
+      '123e4567-e89b-12d3-a456-426614174000',
+      'ws://127.0.0.1:3456/sdk/test-session?token=test-token',
+      false,
+      {
+        model: 'model-b-opus',
+        effort: 'max',
+      },
+    ) as string[]
+
+    expect(args).toContain('--model')
+    expect(args).toContain('model-b-opus')
+    expect(args).toContain('--effort')
+    expect(args).toContain('max')
   })
 })

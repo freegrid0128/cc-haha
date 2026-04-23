@@ -9,6 +9,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { ProviderService } from './providerService.js'
 import { sessionService } from './sessionService.js'
 import {
   buildClaudeCliArgs,
@@ -47,6 +48,7 @@ type SessionStartOptions = {
   permissionMode?: string
   model?: string
   effort?: string
+  providerId?: string | null
 }
 
 export class ConversationStartupError extends Error {
@@ -67,6 +69,7 @@ export class ConversationStartupError extends Error {
 
 export class ConversationService {
   private sessions = new Map<string, SessionProcess>()
+  private providerService = new ProviderService()
 
   private buildSessionCliArgs(
     sessionId: string,
@@ -140,7 +143,7 @@ export class ConversationService {
     // 工作目录就变成 `/`。把 CALLER_DIR / PWD 显式覆盖成 workDir，preload.ts
     // chdir 后落到正确目录。
     //
-    const childEnv = await this.buildChildEnv(workDir, sdkUrl)
+    const childEnv = await this.buildChildEnv(workDir, sdkUrl, options)
 
     let proc: ReturnType<typeof Bun.spawn>
     try {
@@ -508,6 +511,7 @@ export class ConversationService {
   private async buildChildEnv(
     workDir: string,
     sdkUrl?: string,
+    options?: SessionStartOptions,
   ): Promise<Record<string, string>> {
     // Provider isolation: when Desktop has its own provider config/index,
     // strip inherited provider env vars so the child CLI reads fresh values
@@ -528,7 +532,7 @@ export class ConversationService {
 
     const cleanEnv = { ...process.env }
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
-    if (this.shouldStripInheritedProviderEnv()) {
+    if (this.shouldStripInheritedProviderEnv(options?.providerId)) {
       for (const key of PROVIDER_ENV_KEYS) {
         delete cleanEnv[key]
       }
@@ -543,6 +547,11 @@ export class ConversationService {
         desktopServerUrl = undefined
       }
     }
+
+    const explicitProviderEnv =
+      typeof options?.providerId === 'string'
+        ? await this.providerService.getProviderRuntimeEnv(options.providerId)
+        : null
 
     return {
       ...cleanEnv,
@@ -565,7 +574,8 @@ export class ConversationService {
       // 残留、只走用户 /login 的 OAuth token。自定义 provider 模式绝不能设,
       // 否则 CLI 会忽略 provider 的 AUTH_TOKEN、错误地走 OAuth 打到第三方
       // endpoint。详见 src/utils/auth.ts isManagedOAuthContext()。
-      ...(this.shouldMarkManagedOAuth()
+      ...(explicitProviderEnv ?? {}),
+      ...(this.shouldMarkManagedOAuth(options?.providerId)
         ? await this.buildOfficialOAuthEnv()
         : {}),
     }
@@ -599,7 +609,11 @@ export class ConversationService {
     return env
   }
 
-  private shouldStripInheritedProviderEnv(): boolean {
+  private shouldStripInheritedProviderEnv(providerId?: string | null): boolean {
+    if (providerId !== undefined) {
+      return true
+    }
+
     const configDir =
       process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
     const ccHahaDir = path.join(configDir, 'cc-haha')
@@ -637,7 +651,14 @@ export class ConversationService {
    * 默认 (读不到 settings.json) 按"官方"处理 — 即使用户从未用过 cc-haha
    * provider 管理,也希望官方 OAuth 能正常工作。
    */
-  private shouldMarkManagedOAuth(): boolean {
+  private shouldMarkManagedOAuth(providerId?: string | null): boolean {
+    if (providerId === null) {
+      return true
+    }
+    if (typeof providerId === 'string') {
+      return false
+    }
+
     const configDir =
       process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
     const settingsPath = path.join(configDir, 'cc-haha', 'settings.json')

@@ -10,7 +10,8 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
 import { fileURLToPath } from 'node:url'
-import { ConversationService } from '../services/conversationService.js'
+import { ConversationService, conversationService } from '../services/conversationService.js'
+import { ProviderService } from '../services/providerService.js'
 
 // ============================================================================
 // ConversationService unit tests
@@ -571,4 +572,150 @@ describe('WebSocket Chat Integration', () => {
       expect(secondMessages.some((msg) => msg.type === 'message_complete')).toBe(true)
     })
   })
+
+  it('should keep using the selected runtime config across the whole session until changed', async () => {
+    const providerService = new ProviderService()
+    const providerA = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Provider A',
+      apiKey: 'key-a',
+      baseUrl: 'http://127.0.0.1:1/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'model-a-main',
+        haiku: 'model-a-haiku',
+        sonnet: 'model-a-sonnet',
+        opus: 'model-a-opus',
+      },
+    })
+    const providerB = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Provider B',
+      apiKey: 'key-b',
+      baseUrl: 'http://127.0.0.1:1/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'model-b-main',
+        haiku: 'model-b-haiku',
+        sonnet: 'model-b-sonnet',
+        opus: 'model-b-opus',
+      },
+    })
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      sessionId: string
+      options: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null } | undefined
+    }> = []
+
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null },
+    ) {
+      startCalls.push({ sessionId: sid, options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+      let phase: 'boot' | 'turn1' | 'switching' | 'turn2' | 'turn3' | 'done' = 'boot'
+      let switchingTriggered = false
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error(`Timed out waiting for runtime persistence flow for session ${sessionId}`))
+        }, 15_000)
+
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+
+          if (msg.type === 'connected' && phase === 'boot') {
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: providerA.id,
+              modelId: 'model-a-sonnet',
+            }))
+            ws.send(JSON.stringify({ type: 'user_message', content: 'first turn' }))
+            phase = 'turn1'
+            return
+          }
+
+          if (msg.type === 'error') {
+            clearTimeout(timeout)
+            ws.close()
+            reject(new Error(msg.message))
+            return
+          }
+
+          if (msg.type === 'message_complete' && phase === 'turn1' && !switchingTriggered) {
+            switchingTriggered = true
+            phase = 'switching'
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: providerB.id,
+              modelId: 'model-b-opus',
+            }))
+            return
+          }
+
+          if (
+            msg.type === 'status' &&
+            msg.state === 'idle' &&
+            phase === 'switching'
+          ) {
+            ws.send(JSON.stringify({ type: 'user_message', content: 'second turn' }))
+            phase = 'turn2'
+            return
+          }
+
+          if (msg.type === 'message_complete' && phase === 'turn2') {
+            ws.send(JSON.stringify({ type: 'user_message', content: 'third turn' }))
+            phase = 'turn3'
+            return
+          }
+
+          if (msg.type === 'message_complete' && phase === 'turn3') {
+            clearTimeout(timeout)
+            phase = 'done'
+            ws.close()
+            resolve()
+          }
+        }
+
+        ws.onerror = () => {
+          reject(new Error(`WebSocket error for runtime persistence session ${sessionId}`))
+        }
+      })
+
+      expect(startCalls).toHaveLength(2)
+      expect(startCalls[0]).toMatchObject({
+        sessionId,
+        options: {
+          providerId: providerA.id,
+          model: 'model-a-sonnet',
+        },
+      })
+      expect(startCalls[1]).toMatchObject({
+        sessionId,
+        options: {
+          providerId: providerB.id,
+          model: 'model-b-opus',
+        },
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
 })

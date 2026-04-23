@@ -4,6 +4,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useTeamStore } from '../../stores/teamStore'
 import { sessionsApi } from '../../api/sessions'
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
@@ -669,7 +670,9 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             </div>
 
             <div className="flex items-center gap-2">
-              {!isMemberSession && <ModelSelector />}
+              {!isMemberSession && activeTabId && (
+                <ModelSelector runtimeKey={activeTabId} disabled={isActive} />
+              )}
               <button
                 onClick={!isMemberSession && isActive ? () => stopGeneration(activeTabId!) : handleSubmit}
                 disabled={!isMemberSession && isActive ? false : !canSubmit}
@@ -709,6 +712,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
                   const { replaceTabSession } = useTabStore.getState()
                   const { disconnectSession, connectToSession } = useChatStore.getState()
                   const newId = await createSession(newWorkDir)
+                  useSessionRuntimeStore.getState().moveSelection(oldId, newId)
                   disconnectSession(oldId)
                   replaceTabSession(oldId, newId)
                   connectToSession(newId)

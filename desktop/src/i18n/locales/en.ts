@@ -81,6 +81,8 @@ export const en = {
   'settings.providers.proxyFailed': '② Proxy failed: {error}',
   'settings.providers.confirmDelete': 'Delete provider "{name}"? This cannot be undone.',
   'settings.providers.activate': 'Activate',
+  'settings.providers.default': 'Default',
+  'settings.providers.setDefault': 'Set default',
   'settings.providers.test': 'Test',
   'settings.providers.edit': 'Edit',
   'settings.providers.requestFailed': 'Request failed',
